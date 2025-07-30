@@ -65,8 +65,7 @@ const certificateSchema = new mongoose.Schema({
   courseName: { 
     type: String, 
     required: true,
-    enum: ["OSHEQ Training", "Safety Training"],
-    index: true  // Added index for better query performance
+    enum: ["OSHEQ Training", "Safety Training"]
   },
   dateofbirth: {  // Changed to match MongoDB
     type: String,
@@ -98,15 +97,19 @@ app.get('/api/certificates/verify', async (req, res) => {
       });
     }
 
-    const certificate = await Certificate.findOne({ 
-      certificateNumber,
-      username: { $regex: new RegExp(username, 'i') } // Case insensitive search
-    }).lean();
+    const certificate = await Certificate.findOne({ certificateNumber }).lean();
     
     if (!certificate) {
       return res.status(404).json({ 
         success: false, 
         message: 'Certificate not found' 
+      });
+    }
+    
+    if (certificate.username.toLowerCase() !== username.toLowerCase()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Username does not match certificate records' 
       });
     }
 
@@ -115,23 +118,19 @@ app.get('/api/certificates/verify', async (req, res) => {
     const pdfPath = path.join(certsDir, pdfName);
     const pdfExists = fs.existsSync(pdfPath);
 
-    // Structured response with all certificate data
-    const responseData = {
+    res.json({
       success: true,
       certificate: {
         holderName: certificate.username,
         certificateNumber: certificate.certificateNumber,
-        courseName: certificate.courseName, // This should be accessible now
-        dateOfIssue: certificate.dateofissue,
-        dateOfBirth: certificate.dateofbirth,
+        courseName: certificate.courseName,
+        dateOfIssue: certificate.dateofissue,  // Using correct field name
+        dateOfBirth: certificate.dateofbirth,  // Using correct field name
         pdfUrl: pdfExists ? `/certificates/${pdfName}` : null,
         pdfExists,
         pdfFileName: certificate.pdfFileName
       }
-    };
-
-    console.log('Response data:', responseData); // Debug log
-    res.json(responseData);
+    });
 
   } catch (error) {
     console.error('Error:', error);
@@ -140,17 +139,6 @@ app.get('/api/certificates/verify', async (req, res) => {
       message: 'Internal server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
-  }
-});
-
-// Get all certificates (for debugging)
-app.get('/api/certificates', async (req, res) => {
-  try {
-    const certificates = await Certificate.find().lean();
-    res.json({ success: true, certificates });
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 
@@ -174,4 +162,4 @@ app.get('/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`)); 
