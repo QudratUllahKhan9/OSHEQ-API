@@ -1,0 +1,10 @@
+  .env
+        /api
+       
+       
+        /models
+     
+      
+        /routes
+        .test.tsx
+/node_modules
