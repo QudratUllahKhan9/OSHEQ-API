@@ -23,7 +23,7 @@ if (!fs.existsSync(certsDir)) {
   console.log('Created certificates directory');
 }
 
-// MongoDB Connection with better error handling
+// MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://wasimrahmanios444:bannu123@cluster0.vjdo0vv.mongodb.net/osheq?retryWrites=true&w=majority&appName=Cluster0';
 
 mongoose.connect(MONGO_URI, {
@@ -37,7 +37,7 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
-// Enhanced Certificate Schema with validation
+// Updated Certificate Schema to match MongoDB fields exactly
 const certificateSchema = new mongoose.Schema({
   certificateNumber: { 
     type: String, 
@@ -45,7 +45,7 @@ const certificateSchema = new mongoose.Schema({
     unique: true,
     match: [/^OSHEQ-\d+$/, 'Please enter a valid certificate number']
   },
-  dateOfIssue: { 
+  dateofissue: {  // Changed to match MongoDB
     type: String, 
     required: true,
     validate: {
@@ -65,10 +65,9 @@ const certificateSchema = new mongoose.Schema({
   courseName: { 
     type: String, 
     required: true,
-    default: "OSHEQ Training",
-    enum: ["OSHEQ Training", "Safety Training"] // Add all your course names
+    enum: ["OSHEQ Training", "Safety Training"]
   },
-  dateOfBirth: {
+  dateofbirth: {  // Changed to match MongoDB
     type: String,
     required: true,
     validate: {
@@ -77,12 +76,16 @@ const certificateSchema = new mongoose.Schema({
       },
       message: props => `${props.value} is not a valid date format (DD/MM/YYYY)`
     }
+  },
+  pdfFileName: {
+    type: String,
+    required: false
   }
 }, { timestamps: true });
 
 const Certificate = mongoose.model('Certificate', certificateSchema, 'certificates');
 
-// Enhanced Verify Certificate Endpoint
+// Verify Certificate Endpoint
 app.get('/api/certificates/verify', async (req, res) => {
   try {
     const { username, certificateNumber } = req.query;
@@ -110,8 +113,9 @@ app.get('/api/certificates/verify', async (req, res) => {
       });
     }
 
-    // Check if PDF exists
-    const pdfPath = path.join(certsDir, `${certificateNumber}.pdf`);
+    // Use pdfFileName if available, otherwise fallback to certificateNumber.pdf
+    const pdfName = certificate.pdfFileName || `${certificate.certificateNumber}.pdf`;
+    const pdfPath = path.join(certsDir, pdfName);
     const pdfExists = fs.existsSync(pdfPath);
 
     res.json({
@@ -120,10 +124,11 @@ app.get('/api/certificates/verify', async (req, res) => {
         holderName: certificate.username,
         certificateNumber: certificate.certificateNumber,
         courseName: certificate.courseName,
-        dateOfIssue: certificate.dateOfIssue,
-        dateOfBirth: certificate.dateOfBirth,
-        pdfUrl: pdfExists ? `/certificates/${certificateNumber}.pdf` : null,
-        pdfExists
+        dateOfIssue: certificate.dateofissue,  // Using correct field name
+        dateOfBirth: certificate.dateofbirth,  // Using correct field name
+        pdfUrl: pdfExists ? `/certificates/${pdfName}` : null,
+        pdfExists,
+        pdfFileName: certificate.pdfFileName
       }
     });
 
@@ -137,52 +142,24 @@ app.get('/api/certificates/verify', async (req, res) => {
   }
 });
 
-// Serve PDF files statically with cache control
+// Serve PDF files
 app.use('/certificates', express.static(certsDir, {
   setHeaders: (res, path) => {
     if (path.endsWith('.pdf')) {
       res.set('Content-Type', 'application/pdf');
       res.set('Content-Disposition', 'inline; filename="certificate.pdf"');
-      res.set('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
+      res.set('Cache-Control', 'public, max-age=86400');
     }
   }
 }));
 
-// Enhanced Health Check
+// Health Check
 app.get('/health', (req, res) => {
-  const status = {
+  res.status(200).json({
     status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    certificatesDir: fs.existsSync(certsDir) ? 'exists' : 'missing',
-    memoryUsage: process.memoryUsage()
-  };
-  res.status(200).json(status);
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-    success: false,
-    message: 'Something broke!',
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
   });
 });
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Certificates directory: ${certsDir}`);
-  console.log(`PDF endpoint: http://localhost:${PORT}/certificates/`);
-});
-
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully');
-  server.close(() => {
-    console.log('Process terminated');
-    process.exit(0);
-  });
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
