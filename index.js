@@ -37,7 +37,7 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
-// Updated Certificate Schema to match MongoDB fields exactly
+// Enhanced Certificate Schema with debugging
 const certificateSchema = new mongoose.Schema({
   certificateNumber: { 
     type: String, 
@@ -45,7 +45,7 @@ const certificateSchema = new mongoose.Schema({
     unique: true,
     match: [/^OSHEQ-\d+$/, 'Please enter a valid certificate number']
   },
-  dateofissue: {  // Changed to match MongoDB
+  dateofissue: {
     type: String, 
     required: true,
     validate: {
@@ -65,9 +65,10 @@ const certificateSchema = new mongoose.Schema({
   courseName: { 
     type: String, 
     required: true,
-    enum: ["OSHEQ Training", "Safety Training"]
+    enum: ["OSHEQ Training", "Safety Training"],
+    default: "OSHEQ Training" // Added default value
   },
-  dateofbirth: {  // Changed to match MongoDB
+  dateofbirth: {
     type: String,
     required: true,
     validate: {
@@ -81,14 +82,19 @@ const certificateSchema = new mongoose.Schema({
     type: String,
     required: false
   }
-}, { timestamps: true });
+}, { 
+  timestamps: true,
+  toJSON: { virtuals: true }, // Ensure virtuals are included when converting to JSON
+  toObject: { virtuals: true } 
+});
 
 const Certificate = mongoose.model('Certificate', certificateSchema, 'certificates');
 
-// Verify Certificate Endpoint
+// Enhanced Verify Certificate Endpoint with debugging
 app.get('/api/certificates/verify', async (req, res) => {
   try {
     const { username, certificateNumber } = req.query;
+    console.log(`Verification request for ${username} with cert ${certificateNumber}`);
     
     if (!username || !certificateNumber) {
       return res.status(400).json({ 
@@ -98,6 +104,7 @@ app.get('/api/certificates/verify', async (req, res) => {
     }
 
     const certificate = await Certificate.findOne({ certificateNumber }).lean();
+    console.log('Found certificate:', certificate); // Debug log
     
     if (!certificate) {
       return res.status(404).json({ 
@@ -113,27 +120,36 @@ app.get('/api/certificates/verify', async (req, res) => {
       });
     }
 
-    // Use pdfFileName if available, otherwise fallback to certificateNumber.pdf
+    // Debug: Check if courseName exists
+    if (!certificate.courseName) {
+      console.warn('courseName missing in document, using default');
+      certificate.courseName = "OSHEQ Training"; // Fallback
+    }
+
     const pdfName = certificate.pdfFileName || `${certificate.certificateNumber}.pdf`;
     const pdfPath = path.join(certsDir, pdfName);
     const pdfExists = fs.existsSync(pdfPath);
+    console.log(`PDF exists: ${pdfExists} at ${pdfPath}`); // Debug log
 
-    res.json({
+    const responseData = {
       success: true,
       certificate: {
         holderName: certificate.username,
         certificateNumber: certificate.certificateNumber,
-        courseName: certificate.courseName,
-        dateOfIssue: certificate.dateofissue,  // Using correct field name
-        dateOfBirth: certificate.dateofbirth,  // Using correct field name
+        courseName: certificate.courseName, // Ensured to exist
+        dateOfIssue: certificate.dateofissue,
+        dateOfBirth: certificate.dateofbirth,
         pdfUrl: pdfExists ? `/certificates/${pdfName}` : null,
         pdfExists,
         pdfFileName: certificate.pdfFileName
       }
-    });
+    };
+
+    console.log('Sending response:', responseData); // Debug log
+    res.json(responseData);
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Verification error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Internal server error',
@@ -153,13 +169,21 @@ app.use('/certificates', express.static(certsDir, {
   }
 }));
 
-// Health Check
+// Enhanced Health Check
 app.get('/health', (req, res) => {
-  res.status(200).json({
+  const status = {
     status: 'healthy',
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
-  });
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    certificatesDir: fs.existsSync(certsDir) ? 'exists' : 'missing'
+  };
+  res.status(200).json(status);
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`)); 
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Certificates directory: ${certsDir}`);
+  console.log(`PDF endpoint: http://localhost:${PORT}/certificates/`);
+});
