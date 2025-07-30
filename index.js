@@ -37,7 +37,39 @@ mongoose.connect(MONGO_URI, {
   process.exit(1);
 });
 
-// Enhanced Certificate Schema with debugging
+// Course Schema
+const courseSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, { timestamps: true });
+
+const Course = mongoose.model('Course', courseSchema, 'courses');
+
+// Initialize default courses if they don't exist
+async function initializeCourses() {
+  try {
+    const defaultCourses = ["OSHEQ Training", "Safety Training"];
+    for (const courseName of defaultCourses) {
+      await Course.findOneAndUpdate(
+        { name: courseName },
+        { $setOnInsert: { name: courseName } },
+        { upsert: true, new: true }
+      );
+    }
+    console.log('Courses initialized');
+  } catch (err) {
+    console.error('Error initializing courses:', err);
+  }
+}
+
+// Certificate Schema
 const certificateSchema = new mongoose.Schema({
   certificateNumber: { 
     type: String, 
@@ -65,8 +97,14 @@ const certificateSchema = new mongoose.Schema({
   courseName: { 
     type: String, 
     required: true,
-    enum: ["OSHEQ Training", "Safety Training"],
-    default: "OSHEQ Training" // Added default value
+    validate: {
+      validator: async function(v) {
+        const course = await Course.findOne({ name: v, isActive: true });
+        return !!course;
+      },
+      message: props => `${props.value} is not a valid course name`
+    },
+    default: "OSHEQ Training"
   },
   dateofbirth: {
     type: String,
@@ -84,13 +122,24 @@ const certificateSchema = new mongoose.Schema({
   }
 }, { 
   timestamps: true,
-  toJSON: { virtuals: true }, // Ensure virtuals are included when converting to JSON
+  toJSON: { virtuals: true },
   toObject: { virtuals: true } 
 });
 
 const Certificate = mongoose.model('Certificate', certificateSchema, 'certificates');
 
-// Enhanced Verify Certificate Endpoint with debugging
+// Get all active courses endpoint
+app.get('/api/courses', async (req, res) => {
+  try {
+    const courses = await Course.find({ isActive: true }, 'name');
+    res.json(courses.map(c => c.name));
+  } catch (error) {
+    console.error('Error fetching courses:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch courses' });
+  }
+});
+
+// Enhanced Verify Certificate Endpoint
 app.get('/api/certificates/verify', async (req, res) => {
   try {
     const { username, certificateNumber } = req.query;
@@ -104,7 +153,7 @@ app.get('/api/certificates/verify', async (req, res) => {
     }
 
     const certificate = await Certificate.findOne({ certificateNumber }).lean();
-    console.log('Found certificate:', certificate); // Debug log
+    console.log('Found certificate:', certificate);
     
     if (!certificate) {
       return res.status(404).json({ 
@@ -120,23 +169,17 @@ app.get('/api/certificates/verify', async (req, res) => {
       });
     }
 
-    // Debug: Check if courseName exists
-    if (!certificate.courseName) {
-      console.warn('courseName missing in document, using default');
-      certificate.courseName = "OSHEQ Training"; // Fallback
-    }
-
     const pdfName = certificate.pdfFileName || `${certificate.certificateNumber}.pdf`;
     const pdfPath = path.join(certsDir, pdfName);
     const pdfExists = fs.existsSync(pdfPath);
-    console.log(`PDF exists: ${pdfExists} at ${pdfPath}`); // Debug log
+    console.log(`PDF exists: ${pdfExists} at ${pdfPath}`);
 
     const responseData = {
       success: true,
       certificate: {
         holderName: certificate.username,
         certificateNumber: certificate.certificateNumber,
-        courseName: certificate.courseName, // Ensured to exist
+        courseName: certificate.courseName,
         dateOfIssue: certificate.dateofissue,
         dateOfBirth: certificate.dateofbirth,
         pdfUrl: pdfExists ? `/certificates/${pdfName}` : null,
@@ -145,7 +188,6 @@ app.get('/api/certificates/verify', async (req, res) => {
       }
     };
 
-    console.log('Sending response:', responseData); // Debug log
     res.json(responseData);
 
   } catch (error) {
@@ -169,7 +211,7 @@ app.use('/certificates', express.static(certsDir, {
   }
 }));
 
-// Enhanced Health Check
+// Health Check
 app.get('/health', (req, res) => {
   const status = {
     status: 'healthy',
@@ -182,8 +224,13 @@ app.get('/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Certificates directory: ${certsDir}`);
-  console.log(`PDF endpoint: http://localhost:${PORT}/certificates/`);
+
+// Initialize courses and start server
+initializeCourses().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Certificates directory: ${certsDir}`);
+    console.log(`PDF endpoint: http://localhost:${PORT}/certificates/`);
+    console.log(`Courses endpoint: http://localhost:${PORT}/api/courses`);
+  });
 });
