@@ -8,7 +8,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: ['https://osheq.vercel.app', 'http://localhost:3000'],
+  origin: ['https://osheq.vercel.app', 'http://localhost:3000','https://www.osheq.us'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
