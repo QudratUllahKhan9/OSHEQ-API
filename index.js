@@ -1,236 +1,268 @@
+/**
+ * OSHEQ API — certificates + ATP (Authorized Training Partner) onboarding.
+ * Pure-JS PDF rendering (no browser). Boots with MongoDB or JSON fallback.
+ */
 require('dotenv').config();
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
-const app = express();
+const fs = require('fs');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
-// Enhanced Middleware
-app.use(cors({
-  origin: ['https://www.osheq.us', 'http://localhost:3000','https://osheq.vercel.app'],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
-app.use(express.json());
+const store = require('./src/store');
+const mailer = require('./src/mailer');
+const { sign } = require('./src/auth');
+const { adminOnly, atpOnly } = require('./src/auth');
+const cert = require('./src/certService');
+const cloud = require('./src/cloudinary');
+
+const app = express();
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Configure directories
-const certsDir = path.join(__dirname, 'certificates');
-if (!fs.existsSync(certsDir)) {
-  fs.mkdirSync(certsDir, { recursive: true });
-  console.log('Created certificates directory');
-}
-
-// MongoDB Connection
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://wasimrahmanios444:bannu123@cluster0.vjdo0vv.mongodb.net/osheq?retryWrites=true&w=majority&appName=Cluster0';
-
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 5000
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-});
-
-// Course Schema
-const courseSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    unique: true
+const ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    if (ORIGINS.includes(origin) || /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return cb(null, true);
+    return cb(null, false);
   },
-  isActive: {
-    type: Boolean,
-    default: true
-  }
-}, { timestamps: true });
-
-const Course = mongoose.model('Course', courseSchema, 'courses');
-
-// Initialize default courses if they don't exist
-async function initializeCourses() {
-  try {
-    const defaultCourses = ["OSHEQ Training", "Safety Training"];
-    for (const courseName of defaultCourses) {
-      await Course.findOneAndUpdate(
-        { name: courseName },
-        { $setOnInsert: { name: courseName } },
-        { upsert: true, new: true }
-      );
-    }
-    console.log('Courses initialized');
-  } catch (err) {
-    console.error('Error initializing courses:', err);
-  }
-}
-
-// Certificate Schema
-const certificateSchema = new mongoose.Schema({
-  certificateNumber: { 
-    type: String, 
-    required: true, 
-    unique: true,
-    match: [/^OSHEQ-\d+$/, 'Please enter a valid certificate number']
-  },
-  dateofissue: {
-    type: String, 
-    required: true,
-    validate: {
-      validator: function(v) {
-        return /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(v);
-      },
-      message: props => `${props.value} is not a valid date format (DD/MM/YYYY)`
-    }
-  },
-  username: { 
-    type: String, 
-    required: true,
-    trim: true,
-    minlength: 2,
-    maxlength: 50
-  },
-  courseName: { 
-    type: String, 
-    required: true,
-    validate: {
-      validator: async function(v) {
-        const course = await Course.findOne({ name: v, isActive: true });
-        return !!course;
-      },
-      message: props => `${props.value} is not a valid course name`
-    },
-    default: "OSHEQ Training"
-  },
-  dateofbirth: {
-    type: String,
-    required: true,
-    validate: {
-      validator: function(v) {
-        return /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(v);
-      },
-      message: props => `${props.value} is not a valid date format (DD/MM/YYYY)`
-    }
-  },
-  pdfFileName: {
-    type: String,
-    required: false
-  }
-}, { 
-  timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true } 
-});
-
-const Certificate = mongoose.model('Certificate', certificateSchema, 'certificates');
-
-// Get all active courses endpoint
-app.get('/api/courses', async (req, res) => {
-  try {
-    const courses = await Course.find({ isActive: true }, 'name');
-    res.json(courses.map(c => c.name));
-  } catch (error) {
-    console.error('Error fetching courses:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch courses' });
-  }
-});
-
-// Enhanced Verify Certificate Endpoint
-app.get('/api/certificates/verify', async (req, res) => {
-  try {
-    const { username, certificateNumber } = req.query;
-    console.log(`Verification request for ${username} with cert ${certificateNumber}`);
-    
-    if (!username || !certificateNumber) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Both username and certificate number are required' 
-      });
-    }
-
-    const certificate = await Certificate.findOne({ certificateNumber }).lean();
-    console.log('Found certificate:', certificate);
-    
-    if (!certificate) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Certificate not found' 
-      });
-    }
-    
-    if (certificate.username.toLowerCase() !== username.toLowerCase()) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Username does not match certificate records' 
-      });
-    }
-
-    const pdfName = certificate.pdfFileName || `${certificate.certificateNumber}.pdf`;
-    const pdfPath = path.join(certsDir, pdfName);
-    const pdfExists = fs.existsSync(pdfPath);
-    console.log(`PDF exists: ${pdfExists} at ${pdfPath}`);
-
-    const responseData = {
-      success: true,
-      certificate: {
-        holderName: certificate.username,
-        certificateNumber: certificate.certificateNumber,
-        courseName: certificate.courseName,
-        dateOfIssue: certificate.dateofissue,
-        dateOfBirth: certificate.dateofbirth,
-        pdfUrl: pdfExists ? `/certificates/${pdfName}` : null,
-        pdfExists,
-        pdfFileName: certificate.pdfFileName
-      }
-    };
-
-    res.json(responseData);
-
-  } catch (error) {
-    console.error('Verification error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
-// Serve PDF files
-app.use('/certificates', express.static(certsDir, {
-  setHeaders: (res, path) => {
-    if (path.endsWith('.pdf')) {
-      res.set('Content-Type', 'application/pdf');
-      res.set('Content-Disposition', 'inline; filename="certificate.pdf"');
-      res.set('Cache-Control', 'public, max-age=86400');
-    }
-  }
+  credentials: true,
 }));
 
-// Health Check
-app.get('/health', (req, res) => {
-  const status = {
-    status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    certificatesDir: fs.existsSync(certsDir) ? 'exists' : 'missing'
-  };
-  res.status(200).json(status);
+app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
+
+const backendBase = (req) => (process.env.BACKEND_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+const frontendBase = () => (process.env.CORS_ORIGINS || 'http://localhost:3000').split(',')[0].trim();
+
+/* ---------------------------------------------------------------- health */
+app.get('/api/health', (req, res) => res.json({
+  ok: true, uptime: process.uptime(), store: store.mode,
+  mailer: mailer.configured() ? 'smtp' : 'outbox', renderer: 'pure-js',
+}));
+
+/* ------------------------------------------------------------- ATP apply */
+app.post('/api/atp/apply', async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const academy = String(req.body.academy || req.body.organization || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!name || !academy || !email) return res.status(400).json({ ok: false, error: 'Name, academy aur email zaroori hain.' });
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, error: 'Email sahi nahi hai.' });
+
+    const dup = await store.findOne('atp', { email });
+    if (dup && dup.status === 'approved') return res.status(409).json({ ok: false, error: 'Ye email pehle se approved hai — login karein.' });
+    if (dup && dup.status === 'pending') return res.status(409).json({ ok: false, error: 'Ye application pehle se pending hai.' });
+
+    const row = await store.insert('atp', {
+      name, academy, email,
+      contact: String(req.body.contact || '').trim(),
+      note: String(req.body.note || '').trim(),
+      status: 'pending',
+    });
+    res.json({ ok: true, application: { id: row.id, name, academy, email, status: 'pending' } });
+  } catch (e) {
+    console.error('[atp/apply]', e.message);
+    res.status(500).json({ ok: false, error: 'Application save nahi hui.' });
+  }
 });
+
+/* ------------------------------------------------------------- ATP admin */
+app.get('/api/atp', adminOnly, async (req, res) => {
+  const rows = await store.find('atp', req.query.status ? { status: req.query.status } : {});
+  res.json({ ok: true, applications: rows });
+});
+
+app.post('/api/atp/:id/approve', adminOnly, async (req, res) => {
+  try {
+    const app1 = await store.findOne('atp', { id: req.params.id });
+    if (!app1) return res.status(404).json({ ok: false, error: 'Application nahi mili.' });
+    if (app1.status === 'approved') return res.status(409).json({ ok: false, error: 'Pehle se approved hai.' });
+
+    const password = (req.body && req.body.password) || ('Osh' + crypto.randomBytes(4).toString('hex') + '!');
+    const hash = await bcrypt.hash(password, 10);
+    const loginUrl = `${frontendBase()}/atp/login`;
+
+    await store.update('atp', { id: app1.id }, { status: 'approved', approvedAt: new Date().toISOString() });
+    await store.insert('atp_users', {
+      email: app1.email, name: app1.name, academy: app1.academy,
+      passwordHash: hash, atpId: app1.id, role: 'atp',
+      mustChangePassword: true,
+    });
+
+    const msg = mailer.credentialsEmail({ name: app1.name, academy: app1.academy, email: app1.email, password, loginUrl });
+    let mail = { delivered: false };
+    try { mail = await mailer.send({ to: app1.email, ...msg }); }
+    catch (e) { mail = { delivered: false, error: e.message }; }
+
+    console.log('[atp] approved', app1.email, '| mail:', mail.delivered ? 'sent' : 'outbox');
+    res.json({
+      ok: true,
+      credentials: { email: app1.email, name: app1.name, academy: app1.academy, password, loginUrl },
+      mail,
+    });
+  } catch (e) {
+    console.error('[atp/approve]', e.message);
+    res.status(500).json({ ok: false, error: 'Approve fail hua: ' + e.message });
+  }
+});
+
+app.post('/api/atp/:id/reject', adminOnly, async (req, res) => {
+  const row = await store.update('atp', { id: req.params.id }, { status: 'rejected', rejectedAt: new Date().toISOString() });
+  if (!row) return res.status(404).json({ ok: false, error: 'Application nahi mili.' });
+  res.json({ ok: true, application: row });
+});
+
+/* --------------------------------------------------------------- ATP auth */
+app.post('/api/atp/login', async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+    const user = await store.findOne('atp_users', { email });
+    if (!user) return res.status(401).json({ ok: false, error: 'Email ya password galat hai.' });
+    const ok = await bcrypt.compare(password, user.passwordHash || '');
+    if (!ok) return res.status(401).json({ ok: false, error: 'Email ya password galat hai.' });
+    const token = sign({ role: 'atp', sub: user.id, email: user.email, name: user.name, academy: user.academy });
+    res.json({ ok: true, token, user: { name: user.name, academy: user.academy, email: user.email } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'Login fail hua.' });
+  }
+});
+
+app.get('/api/atp/me', atpOnly, async (req, res) => {
+  const user = await store.findOne('atp_users', { id: req.atp.sub });
+  if (!user) return res.status(404).json({ ok: false, error: 'Account nahi mila.' });
+  const mine = await store.find('certificates', { atpEmail: user.email });
+  res.json({ ok: true, user: { name: user.name, academy: user.academy, email: user.email }, certificates: mine });
+});
+
+app.post('/api/atp/change-password', atpOnly, async (req, res) => {
+  const user = await store.findOne('atp_users', { id: req.atp.sub });
+  if (!user) return res.status(404).json({ ok: false, error: 'Account nahi mila.' });
+  const current = String(req.body.currentPassword || '');
+  const next = String(req.body.newPassword || '');
+  if (next.length < 8) return res.status(400).json({ ok: false, error: 'Naya password kam az kam 8 characters.' });
+  if (!(await bcrypt.compare(current, user.passwordHash || ''))) return res.status(401).json({ ok: false, error: 'Purana password galat hai.' });
+  await store.update('atp_users', { id: user.id }, { passwordHash: await bcrypt.hash(next, 10), mustChangePassword: false });
+  res.json({ ok: true });
+});
+
+/* ---------------------------------------------------------- certificates */
+app.post('/api/certificates', adminOnly, async (req, res) => {
+  try {
+    const { name, course, provider, date, certNo } = req.body || {};
+    if (!name) return res.status(400).json({ ok: false, error: 'Participant ka naam zaroori hai.' });
+    const number = String(certNo || '').trim() || String(Math.floor(10000000 + Math.random() * 89999999));
+    if (await store.findOne('certificates', { certNo: number })) {
+      return res.status(409).json({ ok: false, error: `Certificate number "${number}" pehle se maujood hai.` });
+    }
+    const verifyUrl = `${backendBase(req)}/v/${encodeURIComponent(number)}`;
+    const qrDataUrl = await cert.qrFor(verifyUrl);
+    const dateText = cert.formatDate(date);
+    const made = await cert.build({
+      name: String(name).trim(), course: String(course || '').trim(),
+      provider: String(provider || 'Safety Solution Pvt Ltd.').trim(),
+      dateText, certNo: number, qrDataUrl,
+    });
+
+    let storage = 'local', previewUrl = null, pdfUrl = null, uploadError = null;
+    if (cloud.isConfigured()) {
+      try {
+        const meta = { certNo: number, name, course: course || '', provider: provider || '', dateText, verifyUrl };
+        const p = await cloud.uploadPdf(made.pdfPath, number, meta);
+        const i = await cloud.uploadPreview(made.pngPath, number, meta);
+        pdfUrl = p.secure_url; previewUrl = cloud.previewDisplayUrl(i.public_id); storage = 'cloudinary';
+      } catch (e) { uploadError = e.message; }
+    }
+
+    const row = await store.insert('certificates', {
+      certNo: number, name, course: course || '', provider: provider || 'Safety Solution Pvt Ltd.',
+      dateText, verifyUrl, storage, pdfUrl, previewUrl, uploadError,
+      atpEmail: req.body.atpEmail || '', pdfBytes: made.pdfBytes,
+    });
+    res.json({ ok: true, certificate: row, engine: made.engine });
+  } catch (e) {
+    console.error('[cert create]', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/certificates', adminOnly, async (req, res) => {
+  res.json({ ok: true, certificates: await store.find('certificates') });
+});
+
+app.get('/api/certificates/:certNo', async (req, res) => {
+  const row = await store.findOne('certificates', { certNo: req.params.certNo });
+  if (!row) return res.status(404).json({ ok: false, error: 'Certificate not found' });
+  res.json({ ok: true, certificate: row });
+});
+
+/* legacy verify (username + certificateNumber) */
+app.get('/api/certificates/verify', async (req, res) => {
+  const { username, certificateNumber } = req.query;
+  if (!username || !certificateNumber) return res.status(400).json({ success: false, message: 'Both username and certificate number are required' });
+  const row = await store.findOne('certificates', { certNo: certificateNumber });
+  if (!row) return res.status(404).json({ success: false, message: 'Certificate not found' });
+  if (String(row.name).toLowerCase() !== String(username).toLowerCase()) {
+    return res.status(403).json({ success: false, message: 'Username does not match certificate records' });
+  }
+  res.json({ success: true, certificate: { holderName: row.name, certificateNumber: row.certNo, courseName: row.course, dateOfIssue: row.dateText, pdfUrl: `/api/pdf/${row.certNo}` } });
+});
+
+/* verify page — QR lands here */
+app.get('/v/:certNo', async (req, res) => {
+  const row = await store.findOne('certificates', { certNo: req.params.certNo });
+  if (!row) return res.status(404).send(cert.notFoundHtml(req.params.certNo));
+  res.send(cert.verifyHtml(row, { backendBase: backendBase(req) }));
+});
+
+/* raw files */
+app.get('/api/pdf/:certNo', async (req, res) => {
+  const row = await store.findOne('certificates', { certNo: req.params.certNo });
+  if (!row) return res.status(404).json({ ok: false, error: 'Certificate not found' });
+  if (row.storage === 'cloudinary' && row.certNo) {
+    try { return res.redirect(302, cloud.signedPdfUrl(row.certNo)); } catch (_) {}
+  }
+  const p = path.join(cert.PDF_DIR, `${row.certNo}.pdf`);
+  if (!fs.existsSync(p)) return res.status(404).json({ ok: false, error: 'PDF missing' });
+  res.type('application/pdf').sendFile(p);
+});
+
+app.get('/api/preview/:certNo', async (req, res) => {
+  const row = await store.findOne('certificates', { certNo: req.params.certNo });
+  if (!row) return res.status(404).json({ ok: false, error: 'not found' });
+  if (row.previewUrl) return res.redirect(302, row.previewUrl);
+  const p = path.join(cert.PNG_DIR, `${row.certNo}.png`);
+  if (!fs.existsSync(p)) return res.status(404).json({ ok: false, error: 'preview missing' });
+  res.type('image/png').sendFile(p);
+});
+
+app.get('/api/qr/:certNo', async (req, res) => {
+  const row = await store.findOne('certificates', { certNo: req.params.certNo });
+  const target = row ? row.verifyUrl : `${backendBase(req)}/v/${req.params.certNo}`;
+  const buf = await require('qrcode').toBuffer(target, { errorCorrectionLevel: 'M', margin: 0, width: 512 });
+  res.type('image/png').send(buf);
+});
+
+/* admin session check */
+app.post('/api/admin/login', (req, res) => {
+  const key = String((req.body && req.body.key) || '');
+  if (key !== (process.env.ADMIN_KEY || 'osheq-admin-2026')) return res.status(401).json({ ok: false, error: 'Admin key galat hai.' });
+  res.json({ ok: true, token: sign({ role: 'admin' }) });
+});
+
+app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found' }));
 
 const PORT = process.env.PORT || 5000;
-
-// Initialize courses and start server
-initializeCourses().then(() => {
+store.init().catch(() => {}).finally(() => {
   app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Certificates directory: ${certsDir}`);
-    console.log(`PDF endpoint: http://localhost:${PORT}/certificates/`);
-    console.log(`Courses endpoint: http://localhost:${PORT}/api/courses`);
+    console.log(`\nOSHEQ API on http://localhost:${PORT}`);
+    console.log(`store=${store.mode} mailer=${mailer.configured() ? 'smtp' : 'outbox'} renderer=pure-js`);
+    if (!cloud.isConfigured()) console.log('Cloudinary not configured — PDFs stay local in work/');
   });
 });
+
+module.exports = app;
